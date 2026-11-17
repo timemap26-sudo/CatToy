@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d1b12">
+<title>逗貓遊戲 CatToy</title>
+<style>
+  :root {
+    --bg: #0d1b12;
+    --ink: #f4f1e8;
+    --muted: rgba(244, 241, 232, 0.6);
+    --panel: rgba(0, 0, 0, 0.45);
+    --accent: #ffcf4a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "PingFang TC", "Noto Sans TC", sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #hud {
+    position: fixed; top: max(12px, env(safe-area-inset-top)); left: 16px; right: 16px;
+    display: flex; justify-content: space-between; align-items: center;
+    pointer-events: none; font-size: 18px;
+  }
+  #score { background: var(--panel); padding: 6px 14px; border-radius: 999px; }
+  #hud button { pointer-events: auto; }
+  .btn {
+    background: var(--panel); color: var(--ink); border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 999px; padding: 8px 14px; font-size: 16px; cursor: pointer;
+  }
+  .btn.primary { background: var(--accent); color: #1b1300; border: none; font-weight: 700; }
+  #menu, #settings {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(5, 12, 8, 0.75); padding: 16px;
+  }
+  .card {
+    background: #16271c; border-radius: 20px; padding: 24px; width: min(420px, 100%);
+    text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .card h1 { margin: 0 0 4px; font-size: 32px; }
+  .card p { color: var(--muted); margin: 0 0 18px; line-height: 1.5; }
+  .row { display: flex; justify-content: space-between; align-items: center; margin: 12px 0; gap: 12px; text-align: left; }
+  .row label { flex: 1; }
+  .row input[type=range] { width: 50%; }
+  .toys { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 12px 0 18px; }
+  .toys label {
+    background: rgba(255,255,255,0.06); border-radius: 12px; padding: 8px 12px; cursor: pointer;
+    display: flex; gap: 6px; align-items: center;
+  }
+  .hidden { display: none !important; }
+  #hint {
+    position: fixed; bottom: max(14px, env(safe-area-inset-bottom)); left: 0; right: 0;
+    text-align: center; color: var(--muted); font-size: 13px; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud" class="hidden">
+  <span id="score">🐾 0</span>
+  <button class="btn" id="exitBtn" aria-label="選單">⚙︎</button>
+</div>
+<div id="hint" class="hidden">長按右上角 ⚙︎ 2 秒回到選單（避免貓咪誤觸）</div>
+
+<div id="menu">
+  <div class="card">
+    <h1>🐱 逗貓遊戲</h1>
+    <p>把平板放在地上，讓貓咪追逐螢幕上跑來跑去的小東西！<br>抓到會發出吱吱聲喔。</p>
+    <div class="toys" id="toyPicker">
+      <label><input type="checkbox" value="mouse" checked> 🐭 老鼠</label>
+      <label><input type="checkbox" value="bug" checked> 🐞 小蟲</label>
+      <label><input type="checkbox" value="laser" checked> 🔴 雷射點</label>
+      <label><input type="checkbox" value="fish" checked> 🐟 小魚</label>
+      <label><input type="checkbox" value="feather"> 🪶 羽毛</label>
+    </div>
+    <div class="row"><label for="count">數量</label><input id="count" type="range" min="1" max="8" value="3"></div>
+    <div class="row"><label for="speed">速度</label><input id="speed" type="range" min="1" max="5" value="3"></div>
+    <div class="row"><label for="sound">音效</label><input id="sound" type="checkbox" checked></div>
+    <button class="btn primary" id="startBtn" style="width:100%;padding:14px;font-size:20px">開始玩！</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- Audio ----------
+  let audio = null, soundOn = true;
+  function ac() {
+    if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (audio && audio.state === 'suspended') audio.resume();
+    return audio;
+  }
+  function tone(freqStart, freqEnd, dur, type = 'sine', vol = 0.25) {
+    const a = ac(); if (!a || !soundOn) return;
+    const o = a.createOscillator(), g = a.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freqStart, a.currentTime);
+    o.frequency.exponentialRampToValueAtTime(freqEnd, a.currentTime + dur);
+    g.gain.setValueAtTime(vol, a.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + dur);
+    o.connect(g).connect(a.destination);
+    o.start(); o.stop(a.currentTime + dur);
+  }
+  const squeak = () => { tone(2200, 3400, 0.08, 'square', 0.12); setTimeout(() => tone(3000, 2000, 0.1, 'square', 0.1), 90); };
+  const chirp = () => tone(4000 + Math.random() * 1500, 6000, 0.05, 'sine', 0.06);
+  const pop = () => tone(600, 120, 0.15, 'triangle', 0.3);
+
+  // ---------- Helpers ----------
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const TAU = Math.PI * 2;
+
+  // ---------- Toys ----------
+  let speedMul = 1;
+
+  class Toy {
+    constructor(kind) {
+      this.kind = kind;
+      this.size = { mouse: 38, bug: 26, laser: 12, fish: 40, feather: 46 }[kind];
+      this.baseSpeed = { mouse: 260, bug: 160, laser: 520, fish: 180, feather: 120 }[kind];
+      this.respawn();
+    }
+    respawn() {
+      const edge = Math.floor(Math.random() * 4), m = 40;
+      this.x = edge === 0 ? -m : edge === 1 ? W + m : rand(0, W);
+      this.y = edge === 2 ? -m : edge === 3 ? H + m : rand(0, H);
+      if (edge < 2) this.y = rand(m, H - m); else this.x = rand(m, W - m);
+      this.vx = 0; this.vy = 0;
+      this.angle = Math.atan2(H / 2 - this.y, W / 2 - this.x);
+      this.pickTarget();
+      this.pause = 0; this.t = Math.random() * 100;
+      this.caught = 0; this.alpha = 1;
+    }
+    pickTarget() {
+      const m = 50;
+      this.tx = rand(m, W - m); this.ty = rand(m + 40, H - m);
+      // occasionally hide near edges like real prey
+      if (Math.random() < 0.25) {
+        if (Math.random() < 0.5) this.tx = Math.random() < 0.5 ? m * 0.6 : W - m * 0.6;
+        else this.ty = Math.random() < 0.5 ? m + 30 : H - m * 0.6;
+      }
+      this.dartSpeed = rand(0.6, 1.4);
+    }
+    flee(px, py) {
+      // a near miss makes prey dash away
+      const dx = this.x - px, dy = this.y - py, d = Math.hypot(dx, dy) || 1;
+      this.tx = clamp(this.x + dx / d * 300, 30, W - 30);
+      this.ty = clamp(this.y + dy / d * 300, 70, H - 30);
+      this.pause = 0; this.dartSpeed = 1.8;
+    }
+    update(dt) {
+      this.t += dt;
+      if (this.caught > 0) {
+        this.caught -= dt; this.alpha = clamp(this.caught / 0.5, 0, 1);
+        if (this.caught <= 0) this.respawn();
+        return;
+      }
+      if (this.pause > 0) {
+        this.pause -= dt;
+        this.vx *= 0.85; this.vy *= 0.85;
+        // twitch while paused
+        if (this.kind !== 'feather' && Math.random() < 0.04) this.angle += rand(-0.6, 0.6);
+        return;
+      }
+      const dx = this.tx - this.x, dy = this.ty - this.y, d = Math.hypot(dx, dy);
+      if (d < 12) {
+        this.pickTarget();
+        const pauseChance = { mouse: 0.6, bug: 0.5, laser: 0.4, fish: 0.3, feather: 0.2 }[this.kind];
+        if (Math.random() < pauseChance) this.pause = rand(0.3, 1.8);
+        if (this.kind === 'bug' && Math.random() < 0.5) chirp();
+        return;
+      }
+      let desired = Math.atan2(dy, dx);
+      if (this.kind === 'bug') desired += Math.sin(this.t * 9) * 0.7;
+      if (this.kind === 'fish') desired += Math.sin(this.t * 3) * 0.4;
+      if (this.kind === 'feather') desired += Math.sin(this.t * 1.7) * 1.0;
+      let diff = ((desired - this.angle + Math.PI) % TAU + TAU) % TAU - Math.PI;
+      const turn = this.kind === 'laser' ? 20 : 7;
+      this.angle += clamp(diff, -turn * dt, turn * dt);
+      const sp = this.baseSpeed * speedMul * this.dartSpeed * Math.min(1, d / 80 + 0.3);
+      this.vx = Math.cos(this.angle) * sp; this.vy = Math.sin(this.angle) * sp;
+      if (this.kind === 'laser') { // laser jumps more directly
+        this.vx = dx / d * sp; this.vy = dy / d * sp;
+      }
+      this.x += this.vx * dt; this.y += this.vy * dt;
+      if (this.kind === 'feather') this.y += Math.sin(this.t * 4) * 30 * dt;
+    }
+    hit(px, py) {
+      return this.caught <= 0 && Math.hypot(px - this.x, py - this.y) < this.size * 1.3 + 18;
+    }
+    draw() {
+      ctx.save();
+      ctx.globalAlpha = this.alpha;
+      ctx.translate(this.x, this.y);
+      // soft shadow
+      if (this.kind !== 'laser') {
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath(); ctx.ellipse(4, 8, this.size * 0.8, this.size * 0.4, 0, 0, TAU); ctx.fill();
+      }
+      ctx.rotate(this.angle);
+      const s = this.size;
+      const moving = Math.hypot(this.vx, this.vy) > 20;
+      if (this.caught > 0) ctx.scale(1 + (0.5 - this.alpha * 0.5), 1 + (0.5 - this.alpha * 0.5));
+      switch (this.kind) {
+        case 'mouse': drawMouse(s, this.t, moving); break;
+        case 'bug': drawBug(s, this.t, moving); break;
+        case 'laser': drawLaser(s, this.t); break;
+        case 'fish': drawFish(s, this.t); break;
+        case 'feather': drawFeather(s, this.t); break;
+      }
+      ctx.restore();
+    }
+  }
+
+  function drawMouse(s, t, moving) {
+    // tail
+    ctx.strokeStyle = '#d99a9a'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-s * 0.9, 0);
+    for (let i = 1; i <= 8; i++) {
+      const x = -s * 0.9 - i * s * 0.18;
+      ctx.lineTo(x, Math.sin(t * 12 + i * 0.8) * s * 0.12 * (i / 4));
+    }
+    ctx.stroke();
+    // feet
+    if (moving) {
+      ctx.fillStyle = '#e8b4b4';
+      const f = Math.sin(t * 30) * s * 0.2;
+      [[0.4, 1], [-0.4, -1]].forEach(([x, k]) => {
+        ctx.beginPath(); ctx.arc(s * x + f * k, s * 0.5, 4, 0, TAU); ctx.fill();
+        ctx.beginPath(); ctx.arc(s * x - f * k, -s * 0.5, 4, 0, TAU); ctx.fill();
+      });
+    }
+    // body
+    ctx.fillStyle = '#b8b8c4';
+    ctx.beginPath(); ctx.ellipse(0, 0, s, s * 0.55, 0, 0, TAU); ctx.fill();
+    // head
+    ctx.beginPath(); ctx.ellipse(s * 0.8, 0, s * 0.5, s * 0.38, 0, 0, TAU); ctx.fill();
+    // ears
+    ctx.fillStyle = '#e8b4b4';
+    ctx.beginPath(); ctx.arc(s * 0.6, -s * 0.38, s * 0.22, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(s * 0.6, s * 0.38, s * 0.22, 0, TAU); ctx.fill();
+    // nose & eyes
+    ctx.fillStyle = '#ff7a9a'; ctx.beginPath(); ctx.arc(s * 1.28, 0, 4, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath(); ctx.arc(s * 0.95, -s * 0.16, 3, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(s * 0.95, s * 0.16, 3, 0, TAU); ctx.fill();
+    // whiskers
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1;
+    [-1, 1].forEach(k => { for (let i = -1; i <= 1; i++) {
+      ctx.beginPath(); ctx.moveTo(s * 1.2, k * 3); ctx.lineTo(s * 1.5, k * (s * 0.3) + i * 5); ctx.stroke();
+    }});
+  }
+
+  function drawBug(s, t, moving) {
+    ctx.strokeStyle = '#222'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+    for (let i = -1; i <= 1; i++) {
+      const w = moving ? Math.sin(t * 40 + i * 2) * 4 : 0;
+      ctx.beginPath(); ctx.moveTo(i * s * 0.4, 0); ctx.lineTo(i * s * 0.5 + w, s * 0.95); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(i * s * 0.4, 0); ctx.lineTo(i * s * 0.5 - w, -s * 0.95); ctx.stroke();
+    }
+    // antennae
+    ctx.beginPath(); ctx.moveTo(s * 0.9, -3); ctx.quadraticCurveTo(s * 1.4, -s * 0.5, s * 1.5, -s * 0.7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(s * 0.9, 3); ctx.quadraticCurveTo(s * 1.4, s * 0.5, s * 1.5, s * 0.7); ctx.stroke();
+    ctx.fillStyle = '#e8322b';
+    ctx.beginPath(); ctx.ellipse(0, 0, s, s * 0.8, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#1a1a1a';
+    ctx.beginPath(); ctx.arc(s * 0.85, 0, s * 0.42, 0, TAU); ctx.fill();
+    ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(s * 0.6, 0); ctx.lineTo(-s, 0); ctx.stroke();
+    [[0.2, 0.35], [-0.35, 0.4], [0.2, -0.35], [-0.35, -0.4]].forEach(([x, y]) => {
+      ctx.beginPath(); ctx.arc(s * x, s * y, s * 0.17, 0, TAU); ctx.fill();
+    });
+  }
+
+  function drawLaser(s, t) {
+    const pulse = 1 + Math.sin(t * 25) * 0.15;
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, s * 3.5 * pulse);
+    g.addColorStop(0, 'rgba(255,40,40,0.9)');
+    g.addColorStop(0.25, 'rgba(255,20,20,0.45)');
+    g.addColorStop(1, 'rgba(255,0,0,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, s * 3.5 * pulse, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#fff4f4'; ctx.beginPath(); ctx.arc(0, 0, s * 0.45, 0, TAU); ctx.fill();
+  }
+
+  function drawFish(s, t) {
+    const wag = Math.sin(t * 10) * 0.35;
+    ctx.fillStyle = '#ff9a3c';
+    ctx.save(); ctx.translate(-s * 0.8, 0); ctx.rotate(wag);
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-s * 0.7, -s * 0.5); ctx.lineTo(-s * 0.7, s * 0.5); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    const g = ctx.createLinearGradient(0, -s * 0.5, 0, s * 0.5);
+    g.addColorStop(0, '#ffb347'); g.addColorStop(1, '#ff7b1c');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(0, 0, s, s * 0.48, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.beginPath(); ctx.ellipse(-s * 0.1, 0, s * 0.12, s * 0.42, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(s * 0.55, -s * 0.1, s * 0.14, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(s * 0.58, -s * 0.1, s * 0.07, 0, TAU); ctx.fill();
+  }
+
+  function drawFeather(s, t) {
+    ctx.rotate(Math.sin(t * 3) * 0.3);
+    const g = ctx.createLinearGradient(-s, 0, s, 0);
+    g.addColorStop(0, '#2fd0c4'); g.addColorStop(0.5, '#6a7cff'); g.addColorStop(1, '#d36bff');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(-s, 0);
+    ctx.quadraticCurveTo(0, -s * 0.55, s, 0);
+    ctx.quadraticCurveTo(0, s * 0.55, -s, 0);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-s * 1.3, 0); ctx.lineTo(s, 0); ctx.stroke();
+    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    for (let i = -0.7; i < 0.9; i += 0.2) {
+      ctx.beginPath(); ctx.moveTo(s * i, 0); ctx.lineTo(s * (i + 0.15), -s * 0.3); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(s * i, 0); ctx.lineTo(s * (i + 0.15), s * 0.3); ctx.stroke();
+    }
+  }
+
+  // ---------- Particles ----------
+  const particles = [];
+  function burst(x, y, color, n = 18) {
+    for (let i = 0; i < n; i++) {
+      const a = rand(0, TAU), sp = rand(80, 340);
+      particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: rand(0.4, 0.9), max: 0.9, color, r: rand(3, 7) });
+    }
+  }
+  const paws = [];
+  function pawPrint(x, y) { paws.push({ x, y, life: 1.2, a: rand(-0.5, 0.5) }); }
+
+  // ---------- Background ----------
+  let grass = [];
+  function makeBg() {
+    grass = [];
+    const n = Math.floor(W * H / 9000);
+    for (let i = 0; i < n; i++) grass.push({ x: rand(0, W), y: rand(0, H), h: rand(6, 16), c: Math.random() });
+  }
+  function drawBg(t) {
+    const g = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.7);
+    g.addColorStop(0, '#1d3a25'); g.addColorStop(1, '#0d1b12');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    ctx.lineWidth = 2; ctx.lineCap = 'round';
+    for (const b of grass) {
+      ctx.strokeStyle = b.c < 0.5 ? 'rgba(80,140,80,0.25)' : 'rgba(110,170,90,0.2)';
+      const sway = Math.sin(t * 1.5 + b.x * 0.02) * 2;
+      ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(b.x + sway, b.y - b.h); ctx.stroke();
+    }
+  }
+
+  // ---------- Game state ----------
+  let toys = [], score = 0, running = false;
+  const scoreEl = document.getElementById('score');
+
+  function start() {
+    const kinds = [...document.querySelectorAll('#toyPicker input:checked')].map(i => i.value);
+    if (!kinds.length) kinds.push('mouse');
+    const count = +document.getElementById('count').value;
+    speedMul = [0, 0.45, 0.7, 1, 1.35, 1.75][+document.getElementById('speed').value];
+    soundOn = document.getElementById('sound').checked;
+    ac();
+    makeBg();
+    toys = [];
+    for (let i = 0; i < count; i++) toys.push(new Toy(kinds[i % kinds.length]));
+    score = 0; scoreEl.textContent = '🐾 0';
+    document.getElementById('menu').classList.add('hidden');
+    document.getElementById('hud').classList.remove('hidden');
+    const hint = document.getElementById('hint');
+    hint.classList.remove('hidden');
+    setTimeout(() => hint.classList.add('hidden'), 5000);
+    running = true;
+    if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(() => {});
+  }
+
+  function stop() {
+    running = false;
+    document.getElementById('menu').classList.remove('hidden');
+    document.getElementById('hud').classList.add('hidden');
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  }
+
+  document.getElementById('startBtn').addEventListener('click', start);
+
+  // long-press exit so cat paws don't close the game
+  const exitBtn = document.getElementById('exitBtn');
+  let holdTimer = null;
+  exitBtn.addEventListener('pointerdown', e => {
+    e.stopPropagation();
+    holdTimer = setTimeout(stop, 2000);
+    exitBtn.style.background = 'rgba(255,207,74,0.5)';
+  });
+  const cancelHold = () => { clearTimeout(holdTimer); exitBtn.style.background = ''; };
+  exitBtn.addEventListener('pointerup', cancelHold);
+  exitBtn.addEventListener('pointerleave', cancelHold);
+
+  const colors = { mouse: '#d8d8e8', bug: '#ff4a3d', laser: '#ff3030', fish: '#ffa040', feather: '#8a8cff' };
+  canvas.addEventListener('pointerdown', e => {
+    if (!running) return;
+    const x = e.clientX, y = e.clientY;
+    pawPrint(x, y);
+    let caught = false;
+    for (const t of toys) {
+      if (t.hit(x, y)) {
+        t.caught = 0.5; caught = true;
+        score++; scoreEl.textContent = '🐾 ' + score;
+        burst(t.x, t.y, colors[t.kind]);
+        if (t.kind === 'mouse') squeak(); else pop();
+        if (navigator.vibrate) navigator.vibrate(40);
+      } else if (Math.hypot(t.x - x, t.y - y) < 160) {
+        t.flee(x, y);
+      }
+    }
+    if (!caught) tone(300, 200, 0.05, 'sine', 0.05);
+  });
+
+  // ---------- Loop ----------
+  let last = performance.now(), time = 0;
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now; time += dt;
+    if (!grass.length) makeBg();
+    drawBg(time);
+    if (running) {
+      for (const p of paws) {
+        p.life -= dt;
+        ctx.save(); ctx.globalAlpha = clamp(p.life, 0, 1) * 0.35; ctx.translate(p.x, p.y); ctx.rotate(p.a);
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.ellipse(0, 6, 11, 9, 0, 0, TAU); ctx.fill();
+        [[-11, -6], [-4, -12], [4, -12], [11, -6]].forEach(([px, py]) => { ctx.beginPath(); ctx.arc(px, py, 4.5, 0, TAU); ctx.fill(); });
+        ctx.restore();
+      }
+      for (let i = paws.length - 1; i >= 0; i--) if (paws[i].life <= 0) paws.splice(i, 1);
+      for (const t of toys) { t.update(dt); t.draw(); }
+      for (const p of particles) {
+        p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92;
+        ctx.globalAlpha = clamp(p.life / p.max, 0, 1);
+        ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
+    }
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', makeBg);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
